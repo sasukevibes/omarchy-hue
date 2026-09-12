@@ -29,10 +29,28 @@ relevant, describe its shape (which keys are present) rather than its values.
   `~/.local/state/omarchy/hue.json`, written with `0600` permissions and its
   parent directory forced to `0700`, so other local users on a shared
   machine can't read it.
-- **No shell injection:** every subprocess invocation (both the QML→Python
-  boundary and `hue.py`'s own `avahi-browse` call) uses an argument list,
-  never a shell string. User-controlled values are never interpolated into a
-  shell command.
+- **No shell injection:** every subprocess invocation (the QML→Python
+  boundary, and `hue.py`'s own `avahi-browse`, `hyprctl`, `grim`,
+  `pw-record`, and `pgrep` calls used by ambient mode) uses an argument
+  list, never a shell string. User-controlled values are never interpolated
+  into a shell command.
+- **Ambient mode's monitor argument is validated** (`valid_monitor` in
+  `hue.py`) before being passed to `grim -o`, the same defense-in-depth
+  posture as `valid_id`/`valid_ip` above. In practice it only ever contains
+  a name `hyprctl monitors` itself reported, surfaced through the QML
+  dropdown — but `hue.py` is a standalone CLI too, so the validation isn't
+  conditional on that path being the only caller.
+- **Light show's colour list is validated** (`valid_colors` in `hue.py`):
+  4-6 comma-separated integers, each reduced modulo 65536 before being sent
+  as a Hue `hue` value. It never reaches a shell or filesystem path — only
+  the bridge's own JSON API — but is still range-checked before use rather
+  than trusted as opaque input, consistent with every other value that
+  reaches `api()`.
+- **No screen or audio content is written to disk or leaves the machine.**
+  Ambient mode reads pixel/audio data entirely in memory to compute an
+  averaged colour and loudness level each tick; only that small numeric
+  result is sent to the bridge, the same as any other colour/brightness
+  command in this plugin.
 - **No `eval`/`exec`/dynamic code loading** anywhere in the Python or QML.
 - **Path/identifier validation:** room and light identifiers, and the bridge
   IP used for pairing, are validated (`valid_id`/`valid_ip` in `hue.py`)

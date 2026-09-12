@@ -22,10 +22,17 @@ is fully keyboard-navigable.
   brightness, `Space` to toggle power, `1`–`6` to apply a colour, `Enter` to
   open a room, `Esc` to back out/close. No mouse required. See
   [Keyboard reference](#keyboard-reference).
+- **Ambient mode** — sync a room's colour to what's on screen and pulse its
+  brightness with system audio. See [Ambient mode](#ambient-mode).
+- **Light show** — pick 4-6 colours and set a room dancing through them,
+  each light cycling independently and speeding up with the music. See
+  [Light show](#light-show).
 - **No cloud, no account.** Talks directly to your bridge on the local
   network over the Hue v1 local API. Nothing leaves your LAN.
 - **Zero dependencies** — the backend is a single dependency-free Python 3
-  script using only the standard library.
+  script using only the standard library. (Ambient mode shells out to a few
+  system binaries — see [Ambient mode](#ambient-mode) — the same way
+  discovery already shells out to `avahi-browse`; no new Python packages.)
 
 ## Requirements
 
@@ -82,11 +89,108 @@ file with anyone.
 Moving the cursor onto a light auto-reveals its own brightness/colour
 controls — no extra keypress needed to see or adjust it.
 
+## Ambient mode
+
+Open a room and flip **Ambient mode** on: the room's colour follows an
+average of what's on your screen, and its brightness pulses a little with
+whatever your system is playing. Only one room can run ambient mode at a
+time — starting it in a different room stops the previous one.
+
+- **Sync from** picks which output(s) feed the colour: **All monitors**
+  blends every active display, or pick one by name (as reported by
+  `hyprctl monitors`) to follow just that screen — useful if only one
+  display is showing the thing you want reflected.
+- It pauses automatically while the screen is locked (`hyprlock`), and if a
+  chosen monitor disconnects mid-session it retries rather than crashing.
+- It keeps running after you close the widget window — turn it off from the
+  room's toggle (or `python3 hue.py ambient-stop`) when you're done.
+- If `pw-record`/`pactl` aren't installed, no default output device can be
+  resolved, or **your default output is a Bluetooth device**, the audio
+  pulse is simply absent — colour sync still works from screen content
+  alone. See [How it works](#how-it-works) for why Bluetooth output is
+  excluded.
+- Colour/brightness are only pushed to the bridge a few times a second, with
+  small changes coalesced, to stay well under the Hue bridge's request-rate
+  limit.
+- **Turn an individual light off to drop it out of the sync.** Ambient mode
+  normally drives the whole room with one action, so a light you turn off
+  by hand would otherwise be flipped straight back on by the next tick.
+  Instead, turning a light off while ambient mode is running excludes just
+  that light until you turn it back on (via its power toggle, or any
+  brightness/colour change) — it rejoins immediately, not on the next
+  incidental screen-colour change.
+
+Requires `grim` and `hyprctl` (both standard on an Omarchy/Hyprland
+install) for screen capture and monitor listing, and optionally `pw-record`
+and `pactl` (both part of PipeWire) for the audio pulse, and `pgrep` for
+lock-screen detection.
+
+## Light show
+
+This lives at the room list level, not inside a single room — **pick one or
+more rooms**, tap 4 to 6 colour swatches, then hit **Start light show**.
+Every selected room's lights are combined into *one* pool before anything
+else happens: a 3-light room plus a 2-light room becomes a single 5-light
+wave, not a group of 3 and a separate group of 2. Each light in that
+combined pool is assigned one part of the audio spectrum — bass, mid, or
+treble, round-robin — and reacts to *that band specifically*, not just
+overall loudness:
+
+- **The bass light is a dedicated driver.** It holds one fixed colour and
+  snaps to full brightness on every bass hit (a kick drum, a bass note),
+  then eases back down — a real strobe-on-the-beat, not a smooth blend.
+  Detected via onset detection (a sharp rise above both a short rolling
+  average and the long-term noise floor), not just "loudness crossed a
+  threshold", so it isn't fooled by a merely-loud sustained passage.
+- **Mid and treble lights keep cycling** through your full palette as
+  before, but their cycle speed and brightness now track their own band's
+  energy — a treble-assigned light livens up on hi-hats/cymbals
+  specifically, for example, rather than the whole mix's overall level.
+- No numpy/FFT (this backend stays dependency-free) — each band is a
+  lightweight two-stage single-pole filter, plenty of separation for real
+  music without real DSP tooling. Same Bluetooth-safe audio tap as ambient
+  mode — see [Ambient mode](#ambient-mode) for why Bluetooth output is
+  skipped.
+- Snappy by default even without audio — cycling lights still flash to
+  their next colour roughly once a second — and everything reacts faster
+  and harder the louder its assigned band gets, down toward the fastest
+  pace the room's light count can sustain without overloading the bridge.
+- Only one dynamic mode runs at a time: starting a light show stops ambient
+  mode (in any room), and vice versa.
+- Click swatches, or add/remove rooms, while a show is running to change it
+  live — it restarts immediately with the new selection, no need to stop
+  first.
+- Turning an individual light off during a show pauses just that light —
+  same per-light exclusion as ambient mode. It stays off until you turn it
+  back on, then rejoins the cycle (immediately advancing if its next
+  scheduled colour change came due while it was paused).
+
 ## How it works
 
 - `hue.py` is a small, dependency-free Python 3 client for the Hue Bridge
   [v1 local API](https://developers.meethue.com/develop/hue-api/). It's
   invoked as a subprocess by the QML UI and talks JSON over stdout.
+- Ambient mode forks a detached background process from `hue.py` (so it
+  survives the widget window closing), tracked by a small state file at
+  `~/.local/state/omarchy/hue-ambient.json`. It samples the screen with
+  `grim`, reads system audio via `pw-record` explicitly targeted at
+  `pactl get-default-sink`'s `.monitor` node, and never writes screen or
+  audio content to disk — only the resulting colour/brightness numbers ever
+  leave the process, as bridge API calls.
+- The audio pulse deliberately skips Bluetooth output devices entirely.
+  `pw-record` is explicitly targeted at the default sink's *monitor*, never
+  its microphone — left to its default it would fall back to PipeWire's
+  default *source*, which on a Bluetooth headset is the mic, and opening
+  that forces the headset onto the low-quality bidirectional HSP/HFP call
+  profile. But testing found that even the monitor-only tap still triggers
+  the same profile renegotiation on at least some Bluetooth stacks/devices
+  — PipeWire/WirePlumber appears to treat *any* capture stream linked to a
+  Bluetooth card as a reason to prefer a profile with microphone support,
+  regardless of what that stream actually targets. There's no known way to
+  safely tap a Bluetooth sink's monitor from here, so `hue.py` checks
+  whether the default sink name starts with `bluez_` and, if so, skips
+  audio capture altogether — ambient mode still runs, just without the
+  audio-driven brightness pulse, on wired/analog/HDMI/USB output only.
 - `manifest.json`, `BarWidget.qml`, `Panel.qml`, and `HueControls.qml` are the
   Omarchy/Quickshell plugin — see the
   [Omarchy plugin docs](https://omarchy.org/) for the shell plugin model.
