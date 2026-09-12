@@ -175,11 +175,11 @@ Item {
   }
   function roomPower(room) { run(["power", String(room.id), room.on ? "off" : "on"]) }
   function roomBrightness(room, value) { run(["brightness", String(room.id), String(Math.round(value))]) }
-  function roomColour(room, hue) { run(["colour", String(room.id), String(hue), "220"]) }
+  function roomColour(room, hue, sat) { run(["colour", String(room.id), String(hue), String(sat === undefined ? 220 : sat)]) }
   function activateScene(room, scene) { run(["scene", String(room.id), String(scene.id)]) }
   function lightPower(light) { run(["light-power", String(light.id), light.on ? "off" : "on"]) }
   function lightBrightness(light, value) { run(["light-brightness", String(light.id), String(Math.round(value))]) }
-  function lightColour(light, hue) { run(["light-colour", String(light.id), String(hue), "220"]) }
+  function lightColour(light, hue, sat) { run(["light-colour", String(light.id), String(hue), String(sat === undefined ? 220 : sat)]) }
 
   // ------------------------------------------------------------- keyboard cursor
   // One flat list at a time: rooms (room list view) or lights (room detail
@@ -487,9 +487,14 @@ Item {
         // wave, not two separate groups), which only makes sense as a
         // cross-room picker rather than something scoped to one room.
         Column {
+          id: lightshowSection
           visible: root.model.paired === true && !root.selectedRoom && (root.model.rooms || []).length > 0
           width: parent.width
           spacing: Style.spacing.sm
+          // Local UI state for the "+ Custom colour" disclosure below — the
+          // spectrum picker itself is only ever staged, never applied live,
+          // so this doesn't need to survive the show starting/stopping.
+          property bool customOpen: false
 
           PanelSeparator { width: parent.width; foreground: root.foreground }
           PanelSectionHeader { text: "LIGHT SHOW"; foreground: root.foreground; fontFamily: root.fontFamily }
@@ -537,6 +542,58 @@ Item {
             }
           }
 
+          // Colours picked from the spectrum picker that aren't one of the
+          // six quick swatches above — shown so they're visible (and
+          // removable) even though the row above can't represent them.
+          Row {
+            spacing: Style.space(8)
+            visible: customRepeater.count > 0
+            Repeater {
+              id: customRepeater
+              model: root.lightshowColorsSel().filter(function(h) {
+                return root.swatches.every(function(s) { return s.h !== h })
+              })
+              Rectangle {
+                required property var modelData
+                width: Style.space(28)
+                height: width
+                radius: width / 2
+                color: Qt.hsva(modelData / 65535, 1, 1, 1)
+                border.width: 3
+                border.color: root.foreground
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  enabled: !root.busy
+                  onClicked: root.toggleLightshowColor(parent.modelData)
+                }
+              }
+            }
+          }
+
+          Button {
+            width: parent.width
+            bordered: true
+            leftAlign: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            text: lightshowSection.customOpen ? "Hide colour picker" : "+ Custom colour"
+            enabled: !root.busy
+            onClicked: lightshowSection.customOpen = !lightshowSection.customOpen
+          }
+
+          ColourPicker {
+            visible: lightshowSection.customOpen
+            width: parent.width
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            showSaturation: false
+            autoCommit: false
+            confirmLabel: "Add to light show"
+            confirmEnabled: !root.busy && root.lightshowColorsSel().length < 6
+            onCommitted: function(hue, sat) { root.toggleLightshowColor(hue) }
+          }
+
           Button {
             width: parent.width
             bordered: true
@@ -565,6 +622,9 @@ Item {
           visible: !!room
           width: parent.width
           spacing: Style.spacing.lg
+          // Local UI state for the "Custom colour" disclosure — the picker
+          // applies live on release, so it doesn't need to track a value.
+          property bool customColourOpen: false
 
           // Whole-room controls — the keyboard cursor's index -1 row.
           CursorSurface {
@@ -657,6 +717,25 @@ Item {
                     }
                   }
                 }
+
+                Button {
+                  anchors.verticalCenter: parent.verticalCenter
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.caption
+                  text: roomDetail.customColourOpen ? "Close" : "Custom…"
+                  enabled: !!roomDetail.room && !root.busy
+                  onClicked: roomDetail.customColourOpen = !roomDetail.customColourOpen
+                }
+              }
+
+              ColourPicker {
+                visible: roomDetail.customColourOpen
+                width: parent.width
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onCommitted: function(hue, sat) { if (roomDetail.room) root.roomColour(roomDetail.room, hue, sat) }
               }
 
               PanelSeparator { width: parent.width; foreground: root.foreground }
@@ -883,6 +962,8 @@ Item {
     readonly property bool expanded: root.selectedLightId === String(lightRow.light.id)
     readonly property bool unreachable: lightRow.light.reachable === false
     readonly property bool hasCursor: root.cursorActive && !!root.selectedRoom && root.cursorIndex === lightRow.rowIndex
+    // Local UI state for this light's "Custom colour" disclosure.
+    property bool customColourOpen: false
 
     CursorSurface {
       id: lightSurface
@@ -987,6 +1068,25 @@ Item {
               }
             }
           }
+
+          Button {
+            anchors.verticalCenter: parent.verticalCenter
+            bordered: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            text: lightRow.customColourOpen ? "Close" : "Custom…"
+            enabled: !root.busy
+            onClicked: lightRow.customColourOpen = !lightRow.customColourOpen
+          }
+        }
+
+        ColourPicker {
+          visible: lightRow.customColourOpen
+          width: parent.width
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onCommitted: function(hue, sat) { root.lightColour(lightRow.light, hue, sat) }
         }
       }
     }
