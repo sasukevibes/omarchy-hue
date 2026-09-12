@@ -18,6 +18,9 @@ is fully keyboard-navigable.
   room.
 - **Per-light control** — drill into a room to power, dim, and colour each
   bulb individually, not just the room as a whole.
+- **Full colour spectrum picker** — six quick swatches for one-tap colours,
+  plus a **Custom…** hue/saturation picker (room, per-light, and light show)
+  for any colour the swatches don't cover.
 - **Fully keyboard-native** — `↑↓`/`jk` to navigate, `←→`/`hl` to nudge
   brightness, `Space` to toggle power, `1`–`6` to apply a colour, `Enter` to
   open a room, `Esc` to back out/close. No mouse required. See
@@ -128,7 +131,9 @@ lock-screen detection.
 ## Light show
 
 This lives at the room list level, not inside a single room — **pick one or
-more rooms**, tap 4 to 6 colour swatches, then hit **Start light show**.
+more rooms**, tap 4 to 6 colour swatches (or open **+ Custom colour** for a
+full hue spectrum picker and add up to 6 colours of your own), then hit
+**Start light show**.
 Every selected room's lights are combined into *one* pool before anything
 else happens: a 3-light room plus a 2-light room becomes a single 5-light
 wave, not a group of 3 and a separate group of 2. Each light in that
@@ -157,9 +162,9 @@ overall loudness:
   pace the room's light count can sustain without overloading the bridge.
 - Only one dynamic mode runs at a time: starting a light show stops ambient
   mode (in any room), and vice versa.
-- Click swatches, or add/remove rooms, while a show is running to change it
-  live — it restarts immediately with the new selection, no need to stop
-  first.
+- Click swatches, add a custom colour, or add/remove rooms, while a show is
+  running to change it live — it restarts immediately with the new
+  selection, no need to stop first.
 - Turning an individual light off during a show pauses just that light —
   same per-light exclusion as ambient mode. It stays off until you turn it
   back on, then rejoins the cycle (immediately advancing if its next
