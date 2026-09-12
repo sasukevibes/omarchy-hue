@@ -128,16 +128,29 @@ lock-screen detection.
 ## Light show
 
 Open a room, tap 4 to 6 of the colour swatches to build a palette, then hit
-**Start light show**. Each light in the room cycles independently through
-your chosen colours on its own staggered timer, so the room is always
-mid-transition somewhere rather than flipping as one flat block.
+**Start light show**. Each light is assigned one part of the audio spectrum
+— bass, mid, or treble, round-robin if there are more lights than bands —
+and reacts to *that band specifically*, not just overall loudness:
 
-- Snappy by default — each light flashes to its next colour roughly once a
-  second even with no audio at all — and loud music pushes it faster still,
-  down toward the fastest pace the room's light count can sustain without
-  overloading the bridge. Same Bluetooth-safe audio tap as ambient
+- **The bass light is a dedicated driver.** It holds one fixed colour and
+  snaps to full brightness on every bass hit (a kick drum, a bass note),
+  then eases back down — a real strobe-on-the-beat, not a smooth blend.
+  Detected via onset detection (a sharp rise above both a short rolling
+  average and the long-term noise floor), not just "loudness crossed a
+  threshold", so it isn't fooled by a merely-loud sustained passage.
+- **Mid and treble lights keep cycling** through your full palette as
+  before, but their cycle speed and brightness now track their own band's
+  energy — a treble-assigned light livens up on hi-hats/cymbals
+  specifically, for example, rather than the whole mix's overall level.
+- No numpy/FFT (this backend stays dependency-free) — each band is a
+  lightweight two-stage single-pole filter, plenty of separation for real
+  music without real DSP tooling. Same Bluetooth-safe audio tap as ambient
   mode — see [Ambient mode](#ambient-mode) for why Bluetooth output is
   skipped.
+- Snappy by default even without audio — cycling lights still flash to
+  their next colour roughly once a second — and everything reacts faster
+  and harder the louder its assigned band gets, down toward the fastest
+  pace the room's light count can sustain without overloading the bridge.
 - Only one dynamic mode runs at a time: starting a light show stops ambient
   mode (in any room), and vice versa.
 - Click swatches while a show is running to change the palette live — it

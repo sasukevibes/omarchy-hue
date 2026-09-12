@@ -108,7 +108,7 @@ Item {
     if (!room) return ""
     var ls = root.model.lightshow || {}
     if (ls.error) return ls.error
-    if (root.lightshowActive(room)) return "Cycling " + (ls.colors || []).length + " colours · speeds up with audio"
+    if (root.lightshowActive(room)) return "Cycling " + (ls.colors || []).length + " colours · one light drives the bass, others react to mid/treble"
     var count = root.lightshowColors(room).length
     return count + " of 4-6 colours picked"
   }

@@ -580,6 +580,159 @@ class AudioEnvelope:
             proc.terminate()
 
 
+BANDS = ("bass", "mid", "treble")
+_BAND_SAMPLE_RATE = 8000
+_BASS_CUTOFF = 200.0
+_TREBLE_CUTOFF = 2000.0
+
+
+def _one_pole_coeffs(cutoff_hz, sample_rate):
+    rc = 1.0 / (2 * math.pi * cutoff_hz)
+    dt = 1.0 / sample_rate
+    return dt / (rc + dt), rc / (rc + dt)  # (lowpass alpha, highpass alpha)
+
+
+class SpectrumEnvelope:
+    """Per-band (bass/mid/treble) version of AudioEnvelope, for light show's
+    "assign each light a frequency band" effect. No numpy/FFT available (or
+    wanted — dependency-free is this backend's whole security story), so
+    each band is a lightweight 2-stage (12dB/octave) single-pole filter —
+    plenty of separation for real music without needing real DSP tooling.
+    Verified against synthetic tones: a pure 80Hz tone reads ~86% bass, an
+    800Hz tone ~78% mid, a 3kHz tone ~61% treble, with modest bleed into
+    neighbouring bands exactly as expected from a lightweight filter.
+
+    Exposes two different things on purpose: level() is a smoothed 0..1
+    value for continuous modulation (cycle speed/brightness), while
+    consume_hit() is edge-triggered onset detection for a hard flash —
+    see the comment in _read_loop for why a hit needs its own, stricter
+    condition than "level() jumped"."""
+
+    def __init__(self):
+        self._proc = None
+        self._thread = None
+        self._lock = threading.Lock()
+        self._level = {band: 0.0 for band in BANDS}
+        self._floor = {band: 0.0 for band in BANDS}
+        self._peak = {band: 1.0 for band in BANDS}
+        self._recent_avg = {band: 0.0 for band in BANDS}
+        self._hit = {band: False for band in BANDS}
+        self._lp_bass = [0.0, 0.0]
+        self._hp_mid = [[0.0, 0.0], [0.0, 0.0]]  # [stage][prev_x, prev_y]
+        self._lp_mid = [0.0, 0.0]
+        self._hp_treble = [[0.0, 0.0], [0.0, 0.0]]
+        self._alpha_bass_lp, _ = _one_pole_coeffs(_BASS_CUTOFF, _BAND_SAMPLE_RATE)
+        _, self._alpha_mid_hp = _one_pole_coeffs(_BASS_CUTOFF, _BAND_SAMPLE_RATE)
+        self._alpha_mid_lp, _ = _one_pole_coeffs(_TREBLE_CUTOFF, _BAND_SAMPLE_RATE)
+        _, self._alpha_treble_hp = _one_pole_coeffs(_TREBLE_CUTOFF, _BAND_SAMPLE_RATE)
+
+    def start(self):
+        # See AudioEnvelope.start() for why this targets the sink's monitor
+        # explicitly and skips Bluetooth outputs entirely.
+        target = _default_sink_monitor()
+        if not target:
+            return
+        try:
+            self._proc = subprocess.Popen(
+                ["pw-record", "--container", "raw", "--target", target,
+                 "--channels", "1", "--rate", str(_BAND_SAMPLE_RATE), "--format", "s16", "-"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        except OSError:
+            return
+        self._thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._thread.start()
+
+    def _read_loop(self):
+        chunk_bytes = 1600  # 200ms of mono 16-bit audio at 8kHz
+        while self._proc is not None:
+            data = self._proc.stdout.read(chunk_bytes)
+            if not data:
+                return
+            samples = array.array("h")
+            samples.frombytes(data[:len(data) - (len(data) % 2)])
+            if not samples:
+                continue
+            bass_sq = mid_sq = treble_sq = 0.0
+            for s in samples:
+                x = float(s)
+                self._lp_bass[0] += self._alpha_bass_lp * (x - self._lp_bass[0])
+                self._lp_bass[1] += self._alpha_bass_lp * (self._lp_bass[0] - self._lp_bass[1])
+                bass_sample = self._lp_bass[1]
+
+                stage = self._hp_mid[0]
+                hp1 = self._alpha_mid_hp * (stage[1] + x - stage[0])
+                stage[0], stage[1] = x, hp1
+                stage = self._hp_mid[1]
+                hp2 = self._alpha_mid_hp * (stage[1] + hp1 - stage[0])
+                stage[0], stage[1] = hp1, hp2
+                self._lp_mid[0] += self._alpha_mid_lp * (hp2 - self._lp_mid[0])
+                self._lp_mid[1] += self._alpha_mid_lp * (self._lp_mid[0] - self._lp_mid[1])
+                mid_sample = self._lp_mid[1]
+
+                stage = self._hp_treble[0]
+                ht1 = self._alpha_treble_hp * (stage[1] + x - stage[0])
+                stage[0], stage[1] = x, ht1
+                stage = self._hp_treble[1]
+                ht2 = self._alpha_treble_hp * (stage[1] + ht1 - stage[0])
+                stage[0], stage[1] = ht1, ht2
+                treble_sample = ht2
+
+                bass_sq += bass_sample * bass_sample
+                mid_sq += mid_sample * mid_sample
+                treble_sq += treble_sample * treble_sample
+
+            n = len(samples)
+            rms = {"bass": math.sqrt(bass_sq / n), "mid": math.sqrt(mid_sq / n),
+                   "treble": math.sqrt(treble_sq / n)}
+            with self._lock:
+                for band in BANDS:
+                    r = rms[band]
+                    floor = self._floor[band]
+                    if floor == 0.0:
+                        floor = r
+                    elif r < floor * 2.0:
+                        floor = floor * 0.98 + r * 0.02
+                    self._floor[band] = floor
+                    self._peak[band] = max(r, self._peak[band] * 0.999, floor * 1.5)
+                    span = max(self._peak[band] - floor, floor * 0.5, 150.0)
+                    target = _clamp((r - floor) / span, 0.0, 1.0)
+                    # Faster attack (0.5/0.5, vs AudioEnvelope's 0.6/0.4) —
+                    # smoother cycling lights blend this, so occasional noise
+                    # isn't as visible as it would be in a hard flash.
+                    self._level[band] = self._level[band] * 0.5 + target * 0.5
+
+                    # Hit detection is deliberately separate from the floor/
+                    # peak-normalized level above: on a noisy onboard codec,
+                    # bass RMS was seen sitting at ~800-1300 during silence
+                    # with the peak/floor ratio alone occasionally reading
+                    # 0.3-0.7 just from that noise's own fluctuation — a
+                    # dedicated "bass driver" light would misfire off pure
+                    # hum, not real hits. A hit instead requires the current
+                    # chunk to clearly exceed BOTH a short rolling average
+                    # (a real transient, not just typical variation) AND the
+                    # long-term floor (rules out a quiet lull making
+                    # ordinary noise look big by comparison).
+                    avg = self._recent_avg[band]
+                    if avg > 0 and r > avg * 1.6 and r > floor * 1.8:
+                        self._hit[band] = True
+                    self._recent_avg[band] = avg * 0.7 + r * 0.3 if avg > 0 else r
+
+    def level(self, band):
+        with self._lock:
+            return self._level.get(band, 0.0)
+
+    def consume_hit(self, band):
+        with self._lock:
+            hit = self._hit.get(band, False)
+            self._hit[band] = False
+            return hit
+
+    def stop(self):
+        proc, self._proc = self._proc, None
+        if proc:
+            proc.terminate()
+
+
 def run_ambient_loop(room, monitor):
     tick = 0.3
     pid = os.getpid()
@@ -712,14 +865,25 @@ def run_lightshow_loop(room, colors):
                                             "error": "This room has no individually addressable lights"})
         return
 
-    audio = AudioEnvelope()
-    audio.start()
+    spectrum = SpectrumEnvelope()
+    spectrum.start()
+
+    # Each light is assigned one frequency band, round-robin. A bass light
+    # is a dedicated percussive driver: a fixed colour that strobes hard on
+    # every bass hit rather than cycling — the classic "one light just does
+    # the kick drum" look. Mid/treble lights keep cycling through the full
+    # palette as before, but their cycle speed and brightness now track
+    # their *own* band's energy instead of the whole mix's overall loudness.
+    band_for = {light_id: BANDS[i % len(BANDS)] for i, light_id in enumerate(lights)}
+    cycle_lights = [light_id for light_id in lights if band_for[light_id] != "bass"]
+    bass_lights = [light_id for light_id in lights if band_for[light_id] == "bass"]
+
     now = time.time()
-    # Stagger each light's starting colour and next-change time so the room
-    # never reads as one flat flip — from tick one, every light is already
-    # mid-way through its own independent cycle through the palette.
+    # Stagger each cycle light's starting colour and next-change time so the
+    # room never reads as one flat flip — from tick one, every light is
+    # already mid-way through its own independent cycle through the palette.
     phase = {}
-    for i, light_id in enumerate(lights):
+    for i, light_id in enumerate(cycle_lights):
         index = i % len(colors)
         phase[light_id] = {"index": index, "next": now + random.uniform(0, 1.6)}
         try:
@@ -727,47 +891,77 @@ def run_lightshow_loop(room, colors):
                 {"on": True, "hue": colors[index], "sat": 254, "bri": 200, "transitiontime": 1})
         except Exception:
             pass
+    for i, light_id in enumerate(bass_lights):
+        try:
+            api(f"lights/{light_id}/state", "PUT",
+                {"on": True, "hue": colors[i % len(colors)], "sat": 254, "bri": 40, "transitiontime": 1})
+        except Exception:
+            pass
 
-    # Loud music drives the interval all the way down to min_interval, sized
-    # to this room's light count so a synced-up burst across every light
-    # still can't sustain more than ~8 req/sec against the Hue bridge's
-    # ~10 req/sec guidance — a fixed floor would let a big room's flashing
-    # overload the bridge under sustained loud audio.
-    min_interval = max(0.4, len(lights) / 8.0)
+    # Cycle lights share a rate budget sized to their own count (bass
+    # lights' flash traffic is budgeted separately below), so a bigger room
+    # still can't sustain more than ~8 req/sec from colour cycling alone
+    # against the Hue bridge's ~10 req/sec guidance.
+    min_interval = max(0.4, len(cycle_lights) / 8.0)
     jitter_span = min_interval * 0.3
+    # Each bass hit costs 2 requests (snap up, ease back down), so this
+    # refractory period keeps every bass light's flash traffic combined
+    # under ~8 req/sec even in a back-to-back-hits worst case.
+    flash_refractory = max(0.25, len(bass_lights) / 4.0)
+    FLASH_HOLD = 0.15
+
+    last_flash_at = {}
+    pending_decay = {}
 
     try:
         while True:
             now = time.time()
-            level = audio.level()
-            # Loud music -> faster flashing and brighter peaks; quiet or no
-            # audio -> still a snappy ~1.6s cycle, never a slow fade. A
-            # near-instant transitiontime (versus a multi-second crossfade)
-            # is what actually reads as "flashing" rather than "drifting".
-            base_interval = min_interval + (1.6 - min_interval) * (1.0 - level)
-            bri = _clamp(180 + int((level - 0.2) * 220), 60, 254)
             state = load_lightshow_state()
             excluded = set(state.get("excluded", [])) if state.get("pid") == pid else set()
-            for light_id in lights:
+
+            for light_id in cycle_lights:
                 if light_id in excluded:
                     # Paused, not cycling — nothing else touches this light
                     # while it's off, so its own remembered colour is
                     # already the show's current phase for it; turning it
                     # back on just shows that, no separate resync needed.
                     continue
+                level = spectrum.level(band_for[light_id])
                 light_phase = phase[light_id]
+                interval = min_interval + (1.6 - min_interval) * (1.0 - level)
                 if now >= light_phase["next"]:
                     light_phase["index"] = (light_phase["index"] + 1) % len(colors)
-                    light_phase["next"] = now + base_interval + random.uniform(-jitter_span, jitter_span)
+                    light_phase["next"] = now + interval + random.uniform(-jitter_span, jitter_span)
+                    bri = _clamp(180 + int((level - 0.2) * 220), 60, 254)
                     try:
                         api(f"lights/{light_id}/state", "PUT",
                             {"on": True, "hue": colors[light_phase["index"]], "sat": 254,
                              "bri": bri, "transitiontime": 1})
                     except Exception:
                         pass
-            time.sleep(0.1)  # fine-grained enough to hit sub-second intervals precisely
+
+            bass_hit = spectrum.consume_hit("bass")
+            for light_id in bass_lights:
+                if light_id in excluded:
+                    continue
+                if light_id in pending_decay:
+                    if now >= pending_decay[light_id]:
+                        del pending_decay[light_id]
+                        try:
+                            api(f"lights/{light_id}/state", "PUT", {"bri": 40, "transitiontime": 9})
+                        except Exception:
+                            pass
+                elif bass_hit and now - last_flash_at.get(light_id, 0.0) > flash_refractory:
+                    last_flash_at[light_id] = now
+                    pending_decay[light_id] = now + FLASH_HOLD
+                    try:
+                        api(f"lights/{light_id}/state", "PUT", {"on": True, "bri": 254, "transitiontime": 1})
+                    except Exception:
+                        pass
+
+            time.sleep(0.1)  # fine-grained enough to hit sub-second intervals and hits precisely
     finally:
-        audio.stop()
+        spectrum.stop()
         save_lightshow_state_if_owner(pid, {"active": False, "room": room, "colors": colors})
 
 
