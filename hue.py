@@ -117,6 +117,33 @@ def ambient_status():
             "monitor": state.get("monitor", "all"), "error": state.get("error", "")}
 
 
+def set_ambient_exclusion(light, excluded):
+    # Ambient mode pushes one room-wide "on" action per tick, which would
+    # otherwise fight anyone who turns an individual light off while it's
+    # running. A light explicitly turned off is excluded from that room-wide
+    # push until it's turned back on (whether via the power toggle or any
+    # brightness/colour change, which already imply "on"). Session-scoped:
+    # a fresh `ambient-start` resets the exclusion list. Harmless no-op if
+    # ambient isn't running, or if this light isn't in the room it's
+    # currently syncing — the loop only ever consults this for its own
+    # room's lights.
+    state = load_ambient_state()
+    if not state.get("active"):
+        return
+    lights = set(state.get("excluded", []))
+    if excluded:
+        lights.add(str(light))
+    else:
+        lights.discard(str(light))
+    state["excluded"] = sorted(lights)
+    save_ambient_state(state)
+
+
+def room_light_ids(room):
+    group = api(f"groups/{valid_id(room)}")
+    return [str(item) for item in group.get("lights", [])]
+
+
 def request(url, method="GET", payload=None, timeout=TIMEOUT):
     body = None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(url, data=body, method=method)
@@ -276,6 +303,8 @@ def set_room(room, payload):
 
 def set_light(light, payload):
     api(f"lights/{valid_id(light)}/state", "PUT", payload)
+    if "on" in payload:
+        set_ambient_exclusion(light, excluded=not payload["on"])
     return snapshot()
 
 
@@ -501,6 +530,7 @@ def run_ambient_loop(room, monitor):
     audio = AudioEnvelope()
     audio.start()
     last_hsb = None
+    last_excluded = set()
     try:
         while True:
             if is_locked():
@@ -519,10 +549,29 @@ def run_ambient_loop(room, monitor):
             # small one-directional +70 boost this started as.
             bri = _clamp(base_bri + int((audio.level() - 0.3) * 220), 1, 254)
             hsb = (hue, sat, bri)
-            if last_hsb is None or _changed_enough(last_hsb, hsb):
+            state = load_ambient_state()
+            excluded = set(state.get("excluded", [])) if state.get("pid") == pid else set()
+            # A light rejoining (or leaving) the sync should snap to the
+            # current colour right away, not wait for the next incidental
+            # screen-colour change — otherwise a just-re-included light can
+            # sit visibly stale for however long the screen stays static.
+            exclusion_changed = excluded != last_excluded
+            last_excluded = excluded
+            if last_hsb is None or _changed_enough(last_hsb, hsb) or exclusion_changed:
+                payload = {"on": True, "hue": hue, "sat": sat, "bri": bri, "transitiontime": 3}
                 try:
-                    api(f"groups/{room}/action", "PUT",
-                        {"on": True, "hue": hue, "sat": sat, "bri": bri, "transitiontime": 3})
+                    if excluded:
+                        # A light's been manually turned off — drop to
+                        # per-light PUTs so the room-wide action doesn't
+                        # turn it back on every tick.
+                        for light_id in room_light_ids(room):
+                            if light_id not in excluded:
+                                try:
+                                    api(f"lights/{light_id}/state", "PUT", payload)
+                                except Exception:
+                                    pass
+                    else:
+                        api(f"groups/{room}/action", "PUT", payload)
                 except Exception:
                     pass
                 last_hsb = hsb
@@ -559,7 +608,8 @@ def ambient_start(room, monitor):
         # screen capture + bridge PUT) can take a moment, and snapshot()
         # below must already reflect "active" so the toggle updates without
         # waiting for the next periodic refresh.
-        save_ambient_state({"active": True, "room": room, "monitor": monitor, "pid": child_pid})
+        save_ambient_state({"active": True, "room": room, "monitor": monitor, "pid": child_pid,
+                            "excluded": []})
         return snapshot()
 
     # Single fork + setsid: the child is reparented to init and keeps running

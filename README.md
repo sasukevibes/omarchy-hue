@@ -109,6 +109,13 @@ time — starting it in a different room stops the previous one.
 - Colour/brightness are only pushed to the bridge a few times a second, with
   small changes coalesced, to stay well under the Hue bridge's request-rate
   limit.
+- **Turn an individual light off to drop it out of the sync.** Ambient mode
+  normally drives the whole room with one action, so a light you turn off
+  by hand would otherwise be flipped straight back on by the next tick.
+  Instead, turning a light off while ambient mode is running excludes just
+  that light until you turn it back on (via its power toggle, or any
+  brightness/colour change) — it rejoins immediately, not on the next
+  incidental screen-colour change.
 
 Requires `grim` and `hyprctl` (both standard on an Omarchy/Hyprland
 install) for screen capture and monitor listing, and optionally `pw-record`
