@@ -8,7 +8,9 @@ import qs.Ui
 Item {
   id: root
   property bool active: false
-  property var model: ({ paired: false, bridges: [], rooms: [], ambient: ({ active: false, room: "", monitor: "all" }) })
+  property var model: ({ paired: false, bridges: [], rooms: [],
+                         ambient: ({ active: false, room: "", monitor: "all" }),
+                         lightshow: ({ active: false, room: "", colors: [] }) })
   property bool busy: false
   property string errorText: ""
   property string selectedRoomId: ""
@@ -18,6 +20,11 @@ Item {
   // on — there's one ambient session at a time, so once it's active the
   // daemon's own reported monitor (in model.ambient) takes over as truth.
   property string pendingMonitor: "all"
+  // Locally-picked light show palette before the show is started — mirrors
+  // pendingMonitor's role for ambient mode. Only one dynamic mode (ambient
+  // or light show) runs at a time, so once a show is active the daemon's
+  // own reported colours (in model.lightshow) take over as truth.
+  property var pendingLightshowColors: []
   property color foreground: Color.foreground
   property string fontFamily: Style.font.family
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -73,6 +80,39 @@ Item {
   function setAmbientMonitor(room, monitor) {
     root.pendingMonitor = monitor
     if (room && root.ambientActive(room)) run(["ambient-start", String(room.id), "--monitor", monitor])
+  }
+  function lightshowActive(room) {
+    var ls = root.model.lightshow
+    return !!room && !!ls && ls.active === true && String(ls.room) === String(room.id)
+  }
+  function lightshowColors(room) {
+    var ls = root.model.lightshow
+    if (room && root.lightshowActive(room)) return ls.colors || []
+    return root.pendingLightshowColors
+  }
+  function toggleLightshowColor(room, hue) {
+    var current = root.lightshowColors(room).slice()
+    var idx = current.indexOf(hue)
+    if (idx >= 0) current.splice(idx, 1)
+    else if (current.length < 6) current.push(hue)
+    root.pendingLightshowColors = current
+    if (room && root.lightshowActive(room) && current.length >= 4 && current.length <= 6)
+      run(["lightshow-start", String(room.id), "--colors", current.join(",")])
+  }
+  function lightshowHint(room) {
+    if (!room) return ""
+    var ls = root.model.lightshow || {}
+    if (ls.error) return ls.error
+    if (root.lightshowActive(room)) return "Cycling " + (ls.colors || []).length + " colours · speeds up with audio"
+    var count = root.lightshowColors(room).length
+    return count + " of 4-6 colours picked"
+  }
+  function toggleLightshow(room) {
+    if (!room) return
+    if (root.lightshowActive(room)) { run(["lightshow-stop"]); return }
+    var colors = root.lightshowColors(room)
+    if (colors.length < 4 || colors.length > 6) return
+    run(["lightshow-start", String(room.id), "--colors", colors.join(",")])
   }
   function roomById(id) {
     var rooms = model.rooms || []
@@ -563,6 +603,65 @@ Item {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onChanged: function(v) { root.setAmbientMonitor(roomDetail.room, v) }
+              }
+
+              PanelSeparator { width: parent.width; foreground: root.foreground }
+
+              Column {
+                width: parent.width
+                spacing: Style.spacing.sm
+
+                Text {
+                  text: "Light show"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+                Text {
+                  width: parent.width
+                  wrapMode: Text.Wrap
+                  text: root.lightshowHint(roomDetail.room)
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Row {
+                  spacing: Style.space(8)
+                  Repeater {
+                    model: root.swatches
+                    Rectangle {
+                      required property var modelData
+                      readonly property bool picked: roomDetail.room &&
+                        root.lightshowColors(roomDetail.room).indexOf(modelData.h) >= 0
+                      width: Style.space(28)
+                      height: width
+                      radius: width / 2
+                      color: modelData.c
+                      border.width: picked ? 3 : 1
+                      border.color: picked ? root.foreground : Qt.darker(root.foreground, 1.5)
+                      MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        enabled: !root.busy
+                        onClicked: root.toggleLightshowColor(roomDetail.room, parent.modelData.h)
+                      }
+                    }
+                  }
+                }
+
+                Button {
+                  width: parent.width
+                  bordered: true
+                  leftAlign: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  text: root.lightshowActive(roomDetail.room) ? "Stop light show" : "Start light show"
+                  enabled: !!roomDetail.room && !root.busy && (root.lightshowActive(roomDetail.room) ||
+                    (root.lightshowColors(roomDetail.room).length >= 4 && root.lightshowColors(roomDetail.room).length <= 6))
+                  onClicked: root.toggleLightshow(roomDetail.room)
+                }
               }
 
               Flow {

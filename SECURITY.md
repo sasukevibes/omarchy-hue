@@ -40,6 +40,12 @@ relevant, describe its shape (which keys are present) rather than its values.
   a name `hyprctl monitors` itself reported, surfaced through the QML
   dropdown — but `hue.py` is a standalone CLI too, so the validation isn't
   conditional on that path being the only caller.
+- **Light show's colour list is validated** (`valid_colors` in `hue.py`):
+  4-6 comma-separated integers, each reduced modulo 65536 before being sent
+  as a Hue `hue` value. It never reaches a shell or filesystem path — only
+  the bridge's own JSON API — but is still range-checked before use rather
+  than trusted as opaque input, consistent with every other value that
+  reaches `api()`.
 - **No screen or audio content is written to disk or leaves the machine.**
   Ambient mode reads pixel/audio data entirely in memory to compute an
   averaged colour and loudness level each tick; only that small numeric

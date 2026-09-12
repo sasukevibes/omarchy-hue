@@ -24,6 +24,9 @@ is fully keyboard-navigable.
   [Keyboard reference](#keyboard-reference).
 - **Ambient mode** — sync a room's colour to what's on screen and pulse its
   brightness with system audio. See [Ambient mode](#ambient-mode).
+- **Light show** — pick 4-6 colours and set a room dancing through them,
+  each light cycling independently and speeding up with the music. See
+  [Light show](#light-show).
 - **No cloud, no account.** Talks directly to your bridge on the local
   network over the Hue v1 local API. Nothing leaves your LAN.
 - **Zero dependencies** — the backend is a single dependency-free Python 3
@@ -121,6 +124,27 @@ Requires `grim` and `hyprctl` (both standard on an Omarchy/Hyprland
 install) for screen capture and monitor listing, and optionally `pw-record`
 and `pactl` (both part of PipeWire) for the audio pulse, and `pgrep` for
 lock-screen detection.
+
+## Light show
+
+Open a room, tap 4 to 6 of the colour swatches to build a palette, then hit
+**Start light show**. Each light in the room cycles independently through
+your chosen colours on its own staggered timer, so the room is always
+mid-transition somewhere rather than flipping as one flat block.
+
+- Loud music speeds the cycle up (as fast as ~2s between changes per light)
+  and brightens the peaks; quiet or no audio settles into a slower ~6s
+  cycle at a gentler brightness. Same Bluetooth-safe audio tap as ambient
+  mode — see [Ambient mode](#ambient-mode) for why Bluetooth output is
+  skipped.
+- Only one dynamic mode runs at a time: starting a light show stops ambient
+  mode (in any room), and vice versa.
+- Click swatches while a show is running to change the palette live — it
+  restarts with the new colours immediately, no need to stop first.
+- Turning an individual light off during a show pauses just that light —
+  same per-light exclusion as ambient mode. It stays off until you turn it
+  back on, then rejoins the cycle (immediately advancing if its next
+  scheduled colour change came due while it was paused).
 
 ## How it works
 

@@ -9,6 +9,7 @@ import colorsys
 import json
 import math
 import os
+import random
 import re
 import signal
 import socket
@@ -22,6 +23,7 @@ from pathlib import Path
 
 STATE = Path.home() / ".local/state/omarchy/hue.json"
 AMBIENT_STATE = Path.home() / ".local/state/omarchy/hue-ambient.json"
+LIGHTSHOW_STATE = Path.home() / ".local/state/omarchy/hue-lightshow.json"
 TIMEOUT = 3
 
 # Hue v1 group/light identifiers are always small decimal integers, and the
@@ -51,6 +53,18 @@ def valid_monitor(value):
     if value == "all" or MONITOR_RE.match(value):
         return value
     raise RuntimeError("Invalid monitor")
+
+
+def valid_colors(value):
+    parts = [p for p in str(value or "").split(",") if p != ""]
+    if not 4 <= len(parts) <= 6:
+        raise RuntimeError("Pick between 4 and 6 colours")
+    colors = []
+    for part in parts:
+        if not re.match(r"^-?[0-9]+$", part):
+            raise RuntimeError("Invalid colour value")
+        colors.append(int(part) % 65536)
+    return colors
 
 
 def emit(value):
@@ -117,6 +131,36 @@ def ambient_status():
             "monitor": state.get("monitor", "all"), "error": state.get("error", "")}
 
 
+def load_lightshow_state():
+    try:
+        value = json.loads(LIGHTSHOW_STATE.read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_lightshow_state(value):
+    LIGHTSHOW_STATE.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(LIGHTSHOW_STATE.parent, 0o700)
+    temporary = LIGHTSHOW_STATE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n")
+    temporary.replace(LIGHTSHOW_STATE)
+
+
+def save_lightshow_state_if_owner(pid, value):
+    if load_lightshow_state().get("pid") == pid:
+        save_lightshow_state(value)
+
+
+def lightshow_status():
+    state = load_lightshow_state()
+    if state.get("active") and not _pid_alive(state.get("pid")):
+        state = {"active": False, "room": state.get("room", ""), "colors": state.get("colors", [])}
+        save_lightshow_state(state)
+    return {"active": bool(state.get("active")), "room": str(state.get("room", "")),
+            "colors": state.get("colors", []), "error": state.get("error", "")}
+
+
 def set_ambient_exclusion(light, excluded):
     # Ambient mode pushes one room-wide "on" action per tick, which would
     # otherwise fight anyone who turns an individual light off while it's
@@ -137,6 +181,25 @@ def set_ambient_exclusion(light, excluded):
         lights.discard(str(light))
     state["excluded"] = sorted(lights)
     save_ambient_state(state)
+
+
+def set_lightshow_exclusion(light, excluded):
+    # Mirrors set_ambient_exclusion: a light turned off during a light show
+    # is excluded from its per-light PUTs (paused, not cycling) until it's
+    # turned back on. Unlike ambient mode, a paused light's own remembered
+    # colour is already the show's current phase for it — nothing else was
+    # touching it while excluded — so no separate resync-on-rejoin is
+    # needed; turning it back on just shows what it already had.
+    state = load_lightshow_state()
+    if not state.get("active"):
+        return
+    lights = set(state.get("excluded", []))
+    if excluded:
+        lights.add(str(light))
+    else:
+        lights.discard(str(light))
+    state["excluded"] = sorted(lights)
+    save_lightshow_state(state)
 
 
 def room_light_ids(room):
@@ -257,6 +320,7 @@ def snapshot():
     if not cfg.get("username"):
         bridges = discover()
         return {"paired": False, "bridges": bridges, "ambient": ambient_status(),
+                "lightshow": lightshow_status(),
                 "message": "Bridge found — press its link button, then Pair" if bridges
                            else "Searching for a Hue bridge on this network"}
     groups = api("groups")
@@ -293,7 +357,7 @@ def snapshot():
                       "lights": room_lights})
     rooms.sort(key=lambda x: x["name"].lower())
     return {"paired": True, "bridge": cfg.get("bridge_name", "Hue Bridge"), "rooms": rooms,
-            "ambient": ambient_status()}
+            "ambient": ambient_status(), "lightshow": lightshow_status()}
 
 
 def set_room(room, payload):
@@ -305,6 +369,7 @@ def set_light(light, payload):
     api(f"lights/{valid_id(light)}/state", "PUT", payload)
     if "on" in payload:
         set_ambient_exclusion(light, excluded=not payload["on"])
+        set_lightshow_exclusion(light, excluded=not payload["on"])
     return snapshot()
 
 
@@ -601,6 +666,7 @@ def ambient_start(room, monitor):
     if not cfg.get("username"):
         raise RuntimeError("Bridge is not paired")
     stop_ambient(quiet=True)
+    stop_lightshow(quiet=True)  # only one dynamic lighting mode runs at a time
 
     child_pid = os.fork()
     if child_pid > 0:
@@ -629,6 +695,113 @@ def ambient_start(room, monitor):
 
     try:
         run_ambient_loop(room, monitor)
+    finally:
+        os._exit(0)
+
+
+def run_lightshow_loop(room, colors):
+    pid = os.getpid()
+    try:
+        lights = room_light_ids(room)
+    except Exception:
+        save_lightshow_state_if_owner(pid, {"active": False, "room": room, "colors": colors,
+                                            "error": "Could not read this room's lights"})
+        return
+    if not lights:
+        save_lightshow_state_if_owner(pid, {"active": False, "room": room, "colors": colors,
+                                            "error": "This room has no individually addressable lights"})
+        return
+
+    audio = AudioEnvelope()
+    audio.start()
+    now = time.time()
+    # Stagger each light's starting colour and next-change time so the room
+    # never reads as one flat flip — from tick one, every light is already
+    # mid-way through its own independent cycle through the palette.
+    phase = {}
+    for i, light_id in enumerate(lights):
+        index = i % len(colors)
+        phase[light_id] = {"index": index, "next": now + random.uniform(0, 4.0)}
+        try:
+            api(f"lights/{light_id}/state", "PUT",
+                {"on": True, "hue": colors[index], "sat": 254, "bri": 180, "transitiontime": 10})
+        except Exception:
+            pass
+
+    try:
+        while True:
+            now = time.time()
+            level = audio.level()
+            # Loud music -> faster colour changes and brighter peaks; quiet
+            # or no audio at all -> a slower, gentler cycle. Base interval
+            # of 6s (down to ~2s when loud) keeps several lights changing at
+            # any moment without ever settling into a static room.
+            base_interval = 6.0 - level * 4.0
+            bri = _clamp(140 + int((level - 0.3) * 200), 30, 254)
+            state = load_lightshow_state()
+            excluded = set(state.get("excluded", [])) if state.get("pid") == pid else set()
+            for light_id in lights:
+                if light_id in excluded:
+                    # Paused, not cycling — nothing else touches this light
+                    # while it's off, so its own remembered colour is
+                    # already the show's current phase for it; turning it
+                    # back on just shows that, no separate resync needed.
+                    continue
+                light_phase = phase[light_id]
+                if now >= light_phase["next"]:
+                    light_phase["index"] = (light_phase["index"] + 1) % len(colors)
+                    light_phase["next"] = now + base_interval + random.uniform(-1.5, 1.5)
+                    try:
+                        api(f"lights/{light_id}/state", "PUT",
+                            {"on": True, "hue": colors[light_phase["index"]], "sat": 254,
+                             "bri": bri, "transitiontime": 15})
+                    except Exception:
+                        pass
+            time.sleep(0.5)
+    finally:
+        audio.stop()
+        save_lightshow_state_if_owner(pid, {"active": False, "room": room, "colors": colors})
+
+
+def stop_lightshow(quiet=False):
+    state = load_lightshow_state()
+    pid = state.get("pid")
+    if pid and _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    save_lightshow_state({"active": False, "room": state.get("room", ""),
+                          "colors": state.get("colors", [])})
+    return None if quiet else snapshot()
+
+
+def lightshow_start(room, colors_arg):
+    room = valid_id(room)
+    colors = valid_colors(colors_arg)
+    cfg = load_config()
+    if not cfg.get("username"):
+        raise RuntimeError("Bridge is not paired")
+    stop_lightshow(quiet=True)
+    stop_ambient(quiet=True)  # only one dynamic lighting mode runs at a time
+
+    child_pid = os.fork()
+    if child_pid > 0:
+        save_lightshow_state({"active": True, "room": room, "colors": colors, "pid": child_pid,
+                              "excluded": []})
+        return snapshot()
+
+    os.setsid()
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    if devnull > 2:
+        os.close(devnull)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    try:
+        run_lightshow_loop(room, colors)
     finally:
         os._exit(0)
 
@@ -666,6 +839,10 @@ def main():
     ambient_start_p.add_argument("room")
     ambient_start_p.add_argument("--monitor", default="all")
     sub.add_parser("ambient-stop")
+    lightshow_start_p = sub.add_parser("lightshow-start")
+    lightshow_start_p.add_argument("room")
+    lightshow_start_p.add_argument("--colors", required=True)
+    sub.add_parser("lightshow-stop")
     sub.add_parser("monitors")
     args = parser.parse_args()
     if args.command == "status": result = snapshot()
@@ -679,6 +856,8 @@ def main():
     elif args.command == "light-colour": result = set_light(args.light, {"on": True, "hue": args.hue % 65536, "sat": max(0, min(254, args.sat))})
     elif args.command == "ambient-start": result = ambient_start(args.room, args.monitor)
     elif args.command == "ambient-stop": result = stop_ambient()
+    elif args.command == "lightshow-start": result = lightshow_start(args.room, args.colors)
+    elif args.command == "lightshow-stop": result = stop_lightshow()
     else: result = monitors()
     emit(result)
 
