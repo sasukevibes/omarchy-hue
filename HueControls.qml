@@ -25,6 +25,10 @@ Item {
   // or light show) runs at a time, so once a show is active the daemon's
   // own reported colours (in model.lightshow) take over as truth.
   property var pendingLightshowColors: []
+  // Set when Start is pressed without 4-6 colours picked yet — a disabled
+  // button that just does nothing on click was confusing, so instead the
+  // button always responds and explains what's missing.
+  property string lightshowWarning: ""
   property color foreground: Color.foreground
   property string fontFamily: Style.font.family
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -96,6 +100,7 @@ Item {
     if (idx >= 0) current.splice(idx, 1)
     else if (current.length < 6) current.push(hue)
     root.pendingLightshowColors = current
+    root.lightshowWarning = ""
     if (room && root.lightshowActive(room) && current.length >= 4 && current.length <= 6)
       run(["lightshow-start", String(room.id), "--colors", current.join(",")])
   }
@@ -109,9 +114,11 @@ Item {
   }
   function toggleLightshow(room) {
     if (!room) return
-    if (root.lightshowActive(room)) { run(["lightshow-stop"]); return }
+    if (root.lightshowActive(room)) { run(["lightshow-stop"]); root.lightshowWarning = ""; return }
     var colors = root.lightshowColors(room)
-    if (colors.length < 4 || colors.length > 6) return
+    if (colors.length < 4) { root.lightshowWarning = "Pick at least 4 colours first — only " + colors.length + " picked so far"; return }
+    if (colors.length > 6) { root.lightshowWarning = "Pick at most 6 colours"; return }
+    root.lightshowWarning = ""
     run(["lightshow-start", String(room.id), "--colors", colors.join(",")])
   }
   function roomById(id) {
@@ -134,6 +141,7 @@ Item {
     selectedLightId = ""
     cursorIndex = room ? -1 : 0
     cursorActive = true
+    lightshowWarning = ""
   }
   function selectLight(light) {
     var key = light ? String(light.id) : ""
@@ -658,9 +666,17 @@ Item {
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                   text: root.lightshowActive(roomDetail.room) ? "Stop light show" : "Start light show"
-                  enabled: !!roomDetail.room && !root.busy && (root.lightshowActive(roomDetail.room) ||
-                    (root.lightshowColors(roomDetail.room).length >= 4 && root.lightshowColors(roomDetail.room).length <= 6))
+                  enabled: !!roomDetail.room && !root.busy
                   onClicked: root.toggleLightshow(roomDetail.room)
+                }
+                Text {
+                  visible: root.lightshowWarning !== ""
+                  width: parent.width
+                  wrapMode: Text.Wrap
+                  text: root.lightshowWarning
+                  color: Color.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
                 }
               }
 

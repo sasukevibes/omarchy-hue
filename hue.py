@@ -721,23 +721,31 @@ def run_lightshow_loop(room, colors):
     phase = {}
     for i, light_id in enumerate(lights):
         index = i % len(colors)
-        phase[light_id] = {"index": index, "next": now + random.uniform(0, 4.0)}
+        phase[light_id] = {"index": index, "next": now + random.uniform(0, 1.6)}
         try:
             api(f"lights/{light_id}/state", "PUT",
-                {"on": True, "hue": colors[index], "sat": 254, "bri": 180, "transitiontime": 10})
+                {"on": True, "hue": colors[index], "sat": 254, "bri": 200, "transitiontime": 1})
         except Exception:
             pass
+
+    # Loud music drives the interval all the way down to min_interval, sized
+    # to this room's light count so a synced-up burst across every light
+    # still can't sustain more than ~8 req/sec against the Hue bridge's
+    # ~10 req/sec guidance — a fixed floor would let a big room's flashing
+    # overload the bridge under sustained loud audio.
+    min_interval = max(0.4, len(lights) / 8.0)
+    jitter_span = min_interval * 0.3
 
     try:
         while True:
             now = time.time()
             level = audio.level()
-            # Loud music -> faster colour changes and brighter peaks; quiet
-            # or no audio at all -> a slower, gentler cycle. Base interval
-            # of 6s (down to ~2s when loud) keeps several lights changing at
-            # any moment without ever settling into a static room.
-            base_interval = 6.0 - level * 4.0
-            bri = _clamp(140 + int((level - 0.3) * 200), 30, 254)
+            # Loud music -> faster flashing and brighter peaks; quiet or no
+            # audio -> still a snappy ~1.6s cycle, never a slow fade. A
+            # near-instant transitiontime (versus a multi-second crossfade)
+            # is what actually reads as "flashing" rather than "drifting".
+            base_interval = min_interval + (1.6 - min_interval) * (1.0 - level)
+            bri = _clamp(180 + int((level - 0.2) * 220), 60, 254)
             state = load_lightshow_state()
             excluded = set(state.get("excluded", [])) if state.get("pid") == pid else set()
             for light_id in lights:
@@ -750,14 +758,14 @@ def run_lightshow_loop(room, colors):
                 light_phase = phase[light_id]
                 if now >= light_phase["next"]:
                     light_phase["index"] = (light_phase["index"] + 1) % len(colors)
-                    light_phase["next"] = now + base_interval + random.uniform(-1.5, 1.5)
+                    light_phase["next"] = now + base_interval + random.uniform(-jitter_span, jitter_span)
                     try:
                         api(f"lights/{light_id}/state", "PUT",
                             {"on": True, "hue": colors[light_phase["index"]], "sat": 254,
-                             "bri": bri, "transitiontime": 15})
+                             "bri": bri, "transitiontime": 1})
                     except Exception:
                         pass
-            time.sleep(0.5)
+            time.sleep(0.1)  # fine-grained enough to hit sub-second intervals precisely
     finally:
         audio.stop()
         save_lightshow_state_if_owner(pid, {"active": False, "room": room, "colors": colors})

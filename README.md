@@ -132,9 +132,10 @@ Open a room, tap 4 to 6 of the colour swatches to build a palette, then hit
 your chosen colours on its own staggered timer, so the room is always
 mid-transition somewhere rather than flipping as one flat block.
 
-- Loud music speeds the cycle up (as fast as ~2s between changes per light)
-  and brightens the peaks; quiet or no audio settles into a slower ~6s
-  cycle at a gentler brightness. Same Bluetooth-safe audio tap as ambient
+- Snappy by default — each light flashes to its next colour roughly once a
+  second even with no audio at all — and loud music pushes it faster still,
+  down toward the fastest pace the room's light count can sustain without
+  overloading the bridge. Same Bluetooth-safe audio tap as ambient
   mode — see [Ambient mode](#ambient-mode) for why Bluetooth output is
   skipped.
 - Only one dynamic mode runs at a time: starting a light show stops ambient
