@@ -8,11 +8,16 @@ import qs.Ui
 Item {
   id: root
   property bool active: false
-  property var model: ({ paired: false, bridges: [], rooms: [] })
+  property var model: ({ paired: false, bridges: [], rooms: [], ambient: ({ active: false, room: "", monitor: "all" }) })
   property bool busy: false
   property string errorText: ""
   property string selectedRoomId: ""
   property string selectedLightId: ""
+  property var monitorList: []
+  // Local UI state for the monitor picker before ambient mode is switched
+  // on — there's one ambient session at a time, so once it's active the
+  // daemon's own reported monitor (in model.ambient) takes over as truth.
+  property string pendingMonitor: "all"
   property color foreground: Color.foreground
   property string fontFamily: Style.font.family
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -33,6 +38,42 @@ Item {
     proc.running = true
   }
   function refresh() { run(["status"]) }
+  function fetchMonitors() {
+    if (monitorsProc.running) return
+    monitorsProc.command = ["python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/ashton.hue/hue.py", "monitors"]
+    monitorsProc.running = true
+  }
+  function ambientActive(room) {
+    var amb = root.model.ambient
+    return !!room && !!amb && amb.active === true && String(amb.room) === String(room.id)
+  }
+  function ambientMonitor() {
+    var amb = root.model.ambient
+    return (amb && amb.active) ? (amb.monitor || "all") : root.pendingMonitor
+  }
+  function ambientHint(room) {
+    if (!room) return ""
+    var amb = root.model.ambient || {}
+    if (amb.error) return amb.error
+    if (root.ambientActive(room))
+      return "Following " + (amb.monitor === "all" ? "all monitors" : amb.monitor) + " · brightens with audio"
+    return "Colours this room to match your screen and pulses with audio"
+  }
+  function monitorOptions() {
+    var opts = [{ value: "all", label: "All monitors" }]
+    var list = root.monitorList || []
+    for (var i = 0; i < list.length; i++) opts.push({ value: list[i], label: list[i] })
+    return opts
+  }
+  function toggleAmbient(room) {
+    if (!room) return
+    if (root.ambientActive(room)) run(["ambient-stop"])
+    else run(["ambient-start", String(room.id), "--monitor", root.pendingMonitor])
+  }
+  function setAmbientMonitor(room, monitor) {
+    root.pendingMonitor = monitor
+    if (room && root.ambientActive(room)) run(["ambient-start", String(room.id), "--monitor", monitor])
+  }
   function roomById(id) {
     var rooms = model.rooms || []
     for (var i = 0; i < rooms.length; i++)
@@ -170,6 +211,7 @@ Item {
     cursorIndex = 0
     cursorActive = true
     refresh()
+    fetchMonitors()
     keyCatcher.forceActiveFocus()
   }
 
@@ -187,6 +229,19 @@ Item {
       }
     }
     onExited: function() { root.busy = false }
+  }
+
+  Process {
+    id: monitorsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var parsed = JSON.parse(text)
+          root.monitorList = parsed.monitors || []
+        } catch (e) { /* leave the previous list in place */ }
+      }
+    }
   }
 
   Timer { interval: 15000; running: root.active && !root.busy; repeat: true; onTriggered: root.refresh() }
@@ -456,6 +511,58 @@ Item {
                     }
                   }
                 }
+              }
+
+              PanelSeparator { width: parent.width; foreground: root.foreground }
+
+              Item {
+                width: parent.width
+                implicitHeight: Math.max(ambientText.implicitHeight, ambientSwitch.implicitHeight)
+
+                Column {
+                  anchors.left: parent.left
+                  anchors.right: ambientSwitch.left
+                  anchors.rightMargin: Style.spacing.sm
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(1)
+
+                  Text {
+                    text: "Ambient mode"
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                  }
+                  Text {
+                    id: ambientText
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: root.ambientHint(roomDetail.room)
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                ToggleSwitch {
+                  id: ambientSwitch
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  checked: root.ambientActive(roomDetail.room)
+                  foreground: root.foreground
+                  enabled: !!roomDetail.room && !root.busy
+                  onToggled: root.toggleAmbient(roomDetail.room)
+                }
+              }
+
+              Dropdown {
+                width: parent.width
+                label: "Sync from"
+                options: root.monitorOptions()
+                value: root.ambientMonitor()
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onChanged: function(v) { root.setAmbientMonitor(roomDetail.room, v) }
               }
 
               Flow {

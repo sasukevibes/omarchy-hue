@@ -22,10 +22,14 @@ is fully keyboard-navigable.
   brightness, `Space` to toggle power, `1`–`6` to apply a colour, `Enter` to
   open a room, `Esc` to back out/close. No mouse required. See
   [Keyboard reference](#keyboard-reference).
+- **Ambient mode** — sync a room's colour to what's on screen and pulse its
+  brightness with system audio. See [Ambient mode](#ambient-mode).
 - **No cloud, no account.** Talks directly to your bridge on the local
   network over the Hue v1 local API. Nothing leaves your LAN.
 - **Zero dependencies** — the backend is a single dependency-free Python 3
-  script using only the standard library.
+  script using only the standard library. (Ambient mode shells out to a few
+  system binaries — see [Ambient mode](#ambient-mode) — the same way
+  discovery already shells out to `avahi-browse`; no new Python packages.)
 
 ## Requirements
 
@@ -82,11 +86,42 @@ file with anyone.
 Moving the cursor onto a light auto-reveals its own brightness/colour
 controls — no extra keypress needed to see or adjust it.
 
+## Ambient mode
+
+Open a room and flip **Ambient mode** on: the room's colour follows an
+average of what's on your screen, and its brightness pulses a little with
+whatever your system is playing. Only one room can run ambient mode at a
+time — starting it in a different room stops the previous one.
+
+- **Sync from** picks which output(s) feed the colour: **All monitors**
+  blends every active display, or pick one by name (as reported by
+  `hyprctl monitors`) to follow just that screen — useful if only one
+  display is showing the thing you want reflected.
+- It pauses automatically while the screen is locked (`hyprlock`), and if a
+  chosen monitor disconnects mid-session it retries rather than crashing.
+- It keeps running after you close the widget window — turn it off from the
+  room's toggle (or `python3 hue.py ambient-stop`) when you're done.
+- If `pw-record` isn't installed, the audio pulse is simply absent — colour
+  sync still works from screen content alone.
+- Colour/brightness are only pushed to the bridge a few times a second, with
+  small changes coalesced, to stay well under the Hue bridge's request-rate
+  limit.
+
+Requires `grim` and `hyprctl` (both standard on an Omarchy/Hyprland
+install) for screen capture and monitor listing, and optionally `pw-record`
+(PipeWire) for the audio pulse and `pgrep` for lock-screen detection.
+
 ## How it works
 
 - `hue.py` is a small, dependency-free Python 3 client for the Hue Bridge
   [v1 local API](https://developers.meethue.com/develop/hue-api/). It's
   invoked as a subprocess by the QML UI and talks JSON over stdout.
+- Ambient mode forks a detached background process from `hue.py` (so it
+  survives the widget window closing), tracked by a small state file at
+  `~/.local/state/omarchy/hue-ambient.json`. It samples the screen with
+  `grim`, reads system audio via `pw-record`, and never writes screen or
+  audio content to disk — only the resulting colour/brightness numbers ever
+  leave the process, as bridge API calls.
 - `manifest.json`, `BarWidget.qml`, `Panel.qml`, and `HueControls.qml` are the
   Omarchy/Quickshell plugin — see the
   [Omarchy plugin docs](https://omarchy.org/) for the shell plugin model.
