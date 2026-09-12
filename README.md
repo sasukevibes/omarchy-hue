@@ -101,17 +101,14 @@ time — starting it in a different room stops the previous one.
   chosen monitor disconnects mid-session it retries rather than crashing.
 - It keeps running after you close the widget window — turn it off from the
   room's toggle (or `python3 hue.py ambient-stop`) when you're done.
-- If `pw-record`/`pactl` aren't installed, or no default output device can
-  be resolved, the audio pulse is simply absent — colour sync still works
-  from screen content alone.
+- If `pw-record`/`pactl` aren't installed, no default output device can be
+  resolved, or **your default output is a Bluetooth device**, the audio
+  pulse is simply absent — colour sync still works from screen content
+  alone. See [How it works](#how-it-works) for why Bluetooth output is
+  excluded.
 - Colour/brightness are only pushed to the bridge a few times a second, with
   small changes coalesced, to stay well under the Hue bridge's request-rate
   limit.
-- The audio pulse always taps the **monitor of your default output
-  device**, never a microphone — it reacts to whatever your system is
-  playing, not ambient room sound, and never touches microphone/input
-  device state (see [How it works](#how-it-works) for why that distinction
-  matters on Bluetooth headsets specifically).
 
 Requires `grim` and `hyprctl` (both standard on an Omarchy/Hyprland
 install) for screen capture and monitor listing, and optionally `pw-record`
@@ -130,13 +127,20 @@ lock-screen detection.
   `pactl get-default-sink`'s `.monitor` node, and never writes screen or
   audio content to disk — only the resulting colour/brightness numbers ever
   leave the process, as bridge API calls.
-- That explicit monitor targeting matters: left to its default, `pw-record`
-  falls back to PipeWire's default *source* instead — which, on a Bluetooth
-  headset, is its microphone. Opening a Bluetooth mic forces the headset off
-  its high-quality A2DP output profile onto the low-quality bidirectional
-  HSP/HFP call profile, audibly degrading or dropping your output audio for
-  as long as ambient mode runs. Targeting the sink's monitor sidesteps this
-  for any output device, not just Bluetooth ones.
+- The audio pulse deliberately skips Bluetooth output devices entirely.
+  `pw-record` is explicitly targeted at the default sink's *monitor*, never
+  its microphone — left to its default it would fall back to PipeWire's
+  default *source*, which on a Bluetooth headset is the mic, and opening
+  that forces the headset onto the low-quality bidirectional HSP/HFP call
+  profile. But testing found that even the monitor-only tap still triggers
+  the same profile renegotiation on at least some Bluetooth stacks/devices
+  — PipeWire/WirePlumber appears to treat *any* capture stream linked to a
+  Bluetooth card as a reason to prefer a profile with microphone support,
+  regardless of what that stream actually targets. There's no known way to
+  safely tap a Bluetooth sink's monitor from here, so `hue.py` checks
+  whether the default sink name starts with `bluez_` and, if so, skips
+  audio capture altogether — ambient mode still runs, just without the
+  audio-driven brightness pulse, on wired/analog/HDMI/USB output only.
 - `manifest.json`, `BarWidget.qml`, `Panel.qml`, and `HueControls.qml` are the
   Omarchy/Quickshell plugin — see the
   [Omarchy plugin docs](https://omarchy.org/) for the shell plugin model.

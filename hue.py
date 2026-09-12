@@ -388,7 +388,18 @@ def _default_sink_monitor():
     except (OSError, subprocess.CalledProcessError):
         return None
     name = result.stdout.strip()
-    return f"{name}.monitor" if name else None
+    if not name or name.startswith("bluez_"):
+        # Confirmed on real hardware: opening *any* capture stream linked to
+        # a Bluetooth card — even one that only targets the sink's monitor,
+        # never the microphone — makes PipeWire/WirePlumber renegotiate the
+        # device onto the bidirectional HSP/HFP profile anyway, degrading
+        # output to low-quality mono with mic sidetone for as long as the
+        # capture runs. There's no known way to tap a Bluetooth A2DP sink's
+        # monitor from here without risking that, so skip audio entirely
+        # when Bluetooth is the output — ambient mode still runs, just
+        # without the audio-driven brightness pulse.
+        return None
+    return f"{name}.monitor"
 
 
 class AudioEnvelope:
