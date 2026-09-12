@@ -381,23 +381,53 @@ def _changed_enough(prev, curr):
     return abs(ph - ch) > 400 or abs(ps - cs) > 6 or abs(pb - cb) > 3
 
 
+def _default_sink_monitor():
+    try:
+        result = subprocess.run(["pactl", "get-default-sink"], capture_output=True,
+                                timeout=2, check=True, text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    name = result.stdout.strip()
+    return f"{name}.monitor" if name else None
+
+
 class AudioEnvelope:
     """Smoothed 0..1 loudness of the default sink's monitor, captured via
-    PipeWire. Auto-gains against a slow-decaying running peak so quiet and
-    loud sources both land in a usable range; degrades to a flat 0 (pure
-    screen-driven brightness, no boost) if pw-record isn't installed."""
+    PipeWire. Auto-gains between a slow-tracking noise floor and a
+    slow-decaying peak so quiet and loud sources both land in a usable
+    range, and constant background noise (mains hum, ADC self-noise, true
+    silence) reads as ~0 rather than pegging at max; degrades to a flat 0
+    (pure screen-driven brightness, no boost) if pw-record/pactl aren't
+    installed or no default sink can be resolved."""
 
     def __init__(self):
         self._proc = None
         self._thread = None
         self._lock = threading.Lock()
         self._level = 0.0
+        self._floor = 0.0
         self._peak = 1.0
 
     def start(self):
+        # Explicitly target the default *sink's monitor*, never PipeWire's
+        # default *source*. Left unset, pw-record falls back to the default
+        # source — which on a Bluetooth headset is its microphone, and
+        # opening that forces the headset off the high-quality A2DP sink
+        # profile onto the low-quality bidirectional HSP/HFP call profile,
+        # audibly degrading or dropping output audio for as long as ambient
+        # mode runs. The monitor of the *sink* carries whatever's already
+        # playing and never touches profile negotiation.
+        target = _default_sink_monitor()
+        if not target:
+            return
         try:
             self._proc = subprocess.Popen(
-                ["pw-record", "--channels", "1", "--rate", "8000", "--format", "s16", "-"],
+                # --container raw: pw-record's default stdout container is a
+                # Sun/NeXT AU file (a 24-byte header before the PCM data), not
+                # headerless PCM. Without this, the header's own bytes get
+                # parsed as if they were the first few audio samples.
+                ["pw-record", "--container", "raw", "--target", target,
+                 "--channels", "1", "--rate", "8000", "--format", "s16", "-"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         except OSError:
             return
@@ -405,7 +435,7 @@ class AudioEnvelope:
         self._thread.start()
 
     def _read_loop(self):
-        chunk_bytes = 800 * 2  # ~50ms of mono 16-bit audio at 8kHz
+        chunk_bytes = 1600  # 200ms of mono 16-bit audio at 8kHz
         while self._proc is not None:
             data = self._proc.stdout.read(chunk_bytes)
             if not data:
@@ -416,8 +446,23 @@ class AudioEnvelope:
                 continue
             rms = math.sqrt(sum(s * s for s in samples) / len(samples))
             with self._lock:
-                self._peak = max(rms, self._peak * 0.999)
-                target = 0.0 if self._peak <= 1 else min(1.0, rms / self._peak)
+                # Real hardware noise floors vary hugely — a clean interface
+                # reads near-zero at idle, a noisy onboard codec can sit at a
+                # few thousand (out of 32767) with nothing playing. The floor
+                # tracks that baseline, seeded from the first sample so
+                # silence doesn't misread as loud during the EMA's warm-up.
+                # The span between floor and peak is bounded to a fraction of
+                # the floor itself (not a fixed constant) so a noisy floor's
+                # own jitter doesn't get mistaken for the full loud range,
+                # and so a quiet interface's tiny floor still gets a usable
+                # amount of headroom to react in.
+                if self._floor == 0.0:
+                    self._floor = rms
+                elif rms < self._floor * 2.0:
+                    self._floor = self._floor * 0.98 + rms * 0.02
+                self._peak = max(rms, self._peak * 0.999, self._floor * 1.5)
+                span = max(self._peak - self._floor, self._floor * 0.5, 150.0)
+                target = _clamp((rms - self._floor) / span, 0.0, 1.0)
                 self._level = self._level * 0.6 + target * 0.4
 
     def level(self):

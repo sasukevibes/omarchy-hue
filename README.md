@@ -101,15 +101,22 @@ time — starting it in a different room stops the previous one.
   chosen monitor disconnects mid-session it retries rather than crashing.
 - It keeps running after you close the widget window — turn it off from the
   room's toggle (or `python3 hue.py ambient-stop`) when you're done.
-- If `pw-record` isn't installed, the audio pulse is simply absent — colour
-  sync still works from screen content alone.
+- If `pw-record`/`pactl` aren't installed, or no default output device can
+  be resolved, the audio pulse is simply absent — colour sync still works
+  from screen content alone.
 - Colour/brightness are only pushed to the bridge a few times a second, with
   small changes coalesced, to stay well under the Hue bridge's request-rate
   limit.
+- The audio pulse always taps the **monitor of your default output
+  device**, never a microphone — it reacts to whatever your system is
+  playing, not ambient room sound, and never touches microphone/input
+  device state (see [How it works](#how-it-works) for why that distinction
+  matters on Bluetooth headsets specifically).
 
 Requires `grim` and `hyprctl` (both standard on an Omarchy/Hyprland
 install) for screen capture and monitor listing, and optionally `pw-record`
-(PipeWire) for the audio pulse and `pgrep` for lock-screen detection.
+and `pactl` (both part of PipeWire) for the audio pulse, and `pgrep` for
+lock-screen detection.
 
 ## How it works
 
@@ -119,9 +126,17 @@ install) for screen capture and monitor listing, and optionally `pw-record`
 - Ambient mode forks a detached background process from `hue.py` (so it
   survives the widget window closing), tracked by a small state file at
   `~/.local/state/omarchy/hue-ambient.json`. It samples the screen with
-  `grim`, reads system audio via `pw-record`, and never writes screen or
+  `grim`, reads system audio via `pw-record` explicitly targeted at
+  `pactl get-default-sink`'s `.monitor` node, and never writes screen or
   audio content to disk — only the resulting colour/brightness numbers ever
   leave the process, as bridge API calls.
+- That explicit monitor targeting matters: left to its default, `pw-record`
+  falls back to PipeWire's default *source* instead — which, on a Bluetooth
+  headset, is its microphone. Opening a Bluetooth mic forces the headset off
+  its high-quality A2DP output profile onto the low-quality bidirectional
+  HSP/HFP call profile, audibly degrading or dropping your output audio for
+  as long as ambient mode runs. Targeting the sink's monitor sidesteps this
+  for any output device, not just Bluetooth ones.
 - `manifest.json`, `BarWidget.qml`, `Panel.qml`, and `HueControls.qml` are the
   Omarchy/Quickshell plugin — see the
   [Omarchy plugin docs](https://omarchy.org/) for the shell plugin model.
