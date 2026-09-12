@@ -512,7 +512,12 @@ def run_ambient_loop(room, monitor):
                 time.sleep(1.0)
                 continue
             hue, sat, base_bri = rgb_to_hue_sat_bri(*rgb)
-            bri = _clamp(base_bri + int(audio.level() * 70), 1, 254)
+            # A real "dancing with the music" look needs quiet moments to
+            # visibly dip, not just loud ones to nudge upward — a ~220-unit
+            # swing (over 80% of Hue's 1-254 range) centered so silence pulls
+            # brightness down and peaks push it toward full, rather than the
+            # small one-directional +70 boost this started as.
+            bri = _clamp(base_bri + int((audio.level() - 0.3) * 220), 1, 254)
             hsb = (hue, sat, bri)
             if last_hsb is None or _changed_enough(last_hsb, hsb):
                 try:
