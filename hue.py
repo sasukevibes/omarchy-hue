@@ -67,6 +67,13 @@ def valid_colors(value):
     return colors
 
 
+def valid_room_list(value):
+    parts = [p for p in str(value or "").split(",") if p != ""]
+    if not parts:
+        raise RuntimeError("Pick at least one room")
+    return [valid_id(p) for p in parts]
+
+
 def emit(value):
     print(json.dumps(value, separators=(",", ":")))
 
@@ -155,9 +162,9 @@ def save_lightshow_state_if_owner(pid, value):
 def lightshow_status():
     state = load_lightshow_state()
     if state.get("active") and not _pid_alive(state.get("pid")):
-        state = {"active": False, "room": state.get("room", ""), "colors": state.get("colors", [])}
+        state = {"active": False, "rooms": state.get("rooms", []), "colors": state.get("colors", [])}
         save_lightshow_state(state)
-    return {"active": bool(state.get("active")), "room": str(state.get("room", "")),
+    return {"active": bool(state.get("active")), "rooms": [str(r) for r in state.get("rooms", [])],
             "colors": state.get("colors", []), "error": state.get("error", "")}
 
 
@@ -852,17 +859,25 @@ def ambient_start(room, monitor):
         os._exit(0)
 
 
-def run_lightshow_loop(room, colors):
+def run_lightshow_loop(rooms, colors):
     pid = os.getpid()
+    # Lights from every selected room are combined into one pool before any
+    # band/phase assignment happens below, so the round-robin continues
+    # across room boundaries instead of restarting at "bass" for each room
+    # — a 3-light room plus a 2-light room is one 5-light wave, not a
+    # group of 3 and a separate group of 2.
     try:
-        lights = room_light_ids(room)
+        lights = []
+        for room in rooms:
+            lights.extend(room_light_ids(room))
+        lights = list(dict.fromkeys(lights))  # de-dupe, preserving order
     except Exception:
-        save_lightshow_state_if_owner(pid, {"active": False, "room": room, "colors": colors,
-                                            "error": "Could not read this room's lights"})
+        save_lightshow_state_if_owner(pid, {"active": False, "rooms": rooms, "colors": colors,
+                                            "error": "Could not read one of these rooms' lights"})
         return
     if not lights:
-        save_lightshow_state_if_owner(pid, {"active": False, "room": room, "colors": colors,
-                                            "error": "This room has no individually addressable lights"})
+        save_lightshow_state_if_owner(pid, {"active": False, "rooms": rooms, "colors": colors,
+                                            "error": "These rooms have no individually addressable lights"})
         return
 
     spectrum = SpectrumEnvelope()
@@ -962,7 +977,7 @@ def run_lightshow_loop(room, colors):
             time.sleep(0.1)  # fine-grained enough to hit sub-second intervals and hits precisely
     finally:
         spectrum.stop()
-        save_lightshow_state_if_owner(pid, {"active": False, "room": room, "colors": colors})
+        save_lightshow_state_if_owner(pid, {"active": False, "rooms": rooms, "colors": colors})
 
 
 def stop_lightshow(quiet=False):
@@ -973,13 +988,13 @@ def stop_lightshow(quiet=False):
             os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
-    save_lightshow_state({"active": False, "room": state.get("room", ""),
+    save_lightshow_state({"active": False, "rooms": state.get("rooms", []),
                           "colors": state.get("colors", [])})
     return None if quiet else snapshot()
 
 
-def lightshow_start(room, colors_arg):
-    room = valid_id(room)
+def lightshow_start(rooms_arg, colors_arg):
+    rooms = valid_room_list(rooms_arg)
     colors = valid_colors(colors_arg)
     cfg = load_config()
     if not cfg.get("username"):
@@ -989,7 +1004,7 @@ def lightshow_start(room, colors_arg):
 
     child_pid = os.fork()
     if child_pid > 0:
-        save_lightshow_state({"active": True, "room": room, "colors": colors, "pid": child_pid,
+        save_lightshow_state({"active": True, "rooms": rooms, "colors": colors, "pid": child_pid,
                               "excluded": []})
         return snapshot()
 
@@ -1003,7 +1018,7 @@ def lightshow_start(room, colors_arg):
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     try:
-        run_lightshow_loop(room, colors)
+        run_lightshow_loop(rooms, colors)
     finally:
         os._exit(0)
 
@@ -1042,7 +1057,7 @@ def main():
     ambient_start_p.add_argument("--monitor", default="all")
     sub.add_parser("ambient-stop")
     lightshow_start_p = sub.add_parser("lightshow-start")
-    lightshow_start_p.add_argument("room")
+    lightshow_start_p.add_argument("--rooms", required=True)
     lightshow_start_p.add_argument("--colors", required=True)
     sub.add_parser("lightshow-stop")
     sub.add_parser("monitors")
@@ -1058,7 +1073,7 @@ def main():
     elif args.command == "light-colour": result = set_light(args.light, {"on": True, "hue": args.hue % 65536, "sat": max(0, min(254, args.sat))})
     elif args.command == "ambient-start": result = ambient_start(args.room, args.monitor)
     elif args.command == "ambient-stop": result = stop_ambient()
-    elif args.command == "lightshow-start": result = lightshow_start(args.room, args.colors)
+    elif args.command == "lightshow-start": result = lightshow_start(args.rooms, args.colors)
     elif args.command == "lightshow-stop": result = stop_lightshow()
     else: result = monitors()
     emit(result)

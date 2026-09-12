@@ -10,7 +10,7 @@ Item {
   property bool active: false
   property var model: ({ paired: false, bridges: [], rooms: [],
                          ambient: ({ active: false, room: "", monitor: "all" }),
-                         lightshow: ({ active: false, room: "", colors: [] }) })
+                         lightshow: ({ active: false, rooms: [], colors: [] }) })
   property bool busy: false
   property string errorText: ""
   property string selectedRoomId: ""
@@ -20,14 +20,16 @@ Item {
   // on — there's one ambient session at a time, so once it's active the
   // daemon's own reported monitor (in model.ambient) takes over as truth.
   property string pendingMonitor: "all"
-  // Locally-picked light show palette before the show is started — mirrors
-  // pendingMonitor's role for ambient mode. Only one dynamic mode (ambient
-  // or light show) runs at a time, so once a show is active the daemon's
-  // own reported colours (in model.lightshow) take over as truth.
+  // Locally-picked light show rooms/palette before the show is started —
+  // mirrors pendingMonitor's role for ambient mode. A show spans every
+  // selected room's lights as one combined pool (see toggleLightshowRun),
+  // so once active the daemon's own reported rooms/colours (in
+  // model.lightshow) take over as truth.
+  property var pendingLightshowRooms: []
   property var pendingLightshowColors: []
-  // Set when Start is pressed without 4-6 colours picked yet — a disabled
-  // button that just does nothing on click was confusing, so instead the
-  // button always responds and explains what's missing.
+  // Set when Start is pressed without a valid room/colour selection yet —
+  // a disabled button that just does nothing on click was confusing, so
+  // instead the button always responds and explains what's missing.
   property string lightshowWarning: ""
   property color foreground: Color.foreground
   property string fontFamily: Style.font.family
@@ -85,41 +87,59 @@ Item {
     root.pendingMonitor = monitor
     if (room && root.ambientActive(room)) run(["ambient-start", String(room.id), "--monitor", monitor])
   }
-  function lightshowActive(room) {
-    var ls = root.model.lightshow
-    return !!room && !!ls && ls.active === true && String(ls.room) === String(room.id)
+  function lightshowIsActive() {
+    return !!(root.model.lightshow && root.model.lightshow.active === true)
   }
-  function lightshowColors(room) {
+  function lightshowRooms() {
     var ls = root.model.lightshow
-    if (room && root.lightshowActive(room)) return ls.colors || []
+    if (root.lightshowIsActive()) return (ls.rooms || []).map(String)
+    return root.pendingLightshowRooms
+  }
+  function lightshowColorsSel() {
+    var ls = root.model.lightshow
+    if (root.lightshowIsActive()) return ls.colors || []
     return root.pendingLightshowColors
   }
-  function toggleLightshowColor(room, hue) {
-    var current = root.lightshowColors(room).slice()
+  function lightshowRoomName(id) {
+    var room = root.roomById(id)
+    return room ? room.name : id
+  }
+  function setLightshowRooms(values) {
+    root.pendingLightshowRooms = values || []
+    root.lightshowWarning = ""
+    var colors = root.lightshowColorsSel()
+    if (root.lightshowIsActive() && root.pendingLightshowRooms.length >= 1 && colors.length >= 4 && colors.length <= 6)
+      run(["lightshow-start", "--rooms", root.pendingLightshowRooms.join(","), "--colors", colors.join(",")])
+  }
+  function toggleLightshowColor(hue) {
+    var current = root.lightshowColorsSel().slice()
     var idx = current.indexOf(hue)
     if (idx >= 0) current.splice(idx, 1)
     else if (current.length < 6) current.push(hue)
     root.pendingLightshowColors = current
     root.lightshowWarning = ""
-    if (room && root.lightshowActive(room) && current.length >= 4 && current.length <= 6)
-      run(["lightshow-start", String(room.id), "--colors", current.join(",")])
+    var rooms = root.lightshowRooms()
+    if (root.lightshowIsActive() && rooms.length >= 1 && current.length >= 4 && current.length <= 6)
+      run(["lightshow-start", "--rooms", rooms.join(","), "--colors", current.join(",")])
   }
-  function lightshowHint(room) {
-    if (!room) return ""
+  function lightshowHint() {
     var ls = root.model.lightshow || {}
     if (ls.error) return ls.error
-    if (root.lightshowActive(room)) return "Cycling " + (ls.colors || []).length + " colours · one light drives the bass, others react to mid/treble"
-    var count = root.lightshowColors(room).length
-    return count + " of 4-6 colours picked"
+    if (root.lightshowIsActive()) {
+      var roomNames = (ls.rooms || []).map(function(id) { return root.lightshowRoomName(id) }).join(", ")
+      return "Cycling " + (ls.colors || []).length + " colours across " + roomNames + " · one light drives the bass, others react to mid/treble"
+    }
+    return root.lightshowRooms().length + " room(s), " + root.lightshowColorsSel().length + " of 4-6 colours picked"
   }
-  function toggleLightshow(room) {
-    if (!room) return
-    if (root.lightshowActive(room)) { run(["lightshow-stop"]); root.lightshowWarning = ""; return }
-    var colors = root.lightshowColors(room)
+  function toggleLightshowRun() {
+    if (root.lightshowIsActive()) { run(["lightshow-stop"]); root.lightshowWarning = ""; return }
+    var rooms = root.lightshowRooms()
+    var colors = root.lightshowColorsSel()
+    if (rooms.length < 1) { root.lightshowWarning = "Pick at least one room first"; return }
     if (colors.length < 4) { root.lightshowWarning = "Pick at least 4 colours first — only " + colors.length + " picked so far"; return }
     if (colors.length > 6) { root.lightshowWarning = "Pick at most 6 colours"; return }
     root.lightshowWarning = ""
-    run(["lightshow-start", String(room.id), "--colors", colors.join(",")])
+    run(["lightshow-start", "--rooms", rooms.join(","), "--colors", colors.join(",")])
   }
   function roomById(id) {
     var rooms = model.rooms || []
@@ -460,6 +480,84 @@ Item {
           }
         }
 
+        // ------------------------------------------------------------ light show
+        // Lives at the room-list level, not inside a single room's detail
+        // view: a show spans every selected room's lights as one combined
+        // pool (so a 3-light room plus a 2-light room is a single 5-light
+        // wave, not two separate groups), which only makes sense as a
+        // cross-room picker rather than something scoped to one room.
+        Column {
+          visible: root.model.paired === true && !root.selectedRoom && (root.model.rooms || []).length > 0
+          width: parent.width
+          spacing: Style.spacing.sm
+
+          PanelSeparator { width: parent.width; foreground: root.foreground }
+          PanelSectionHeader { text: "LIGHT SHOW"; foreground: root.foreground; fontFamily: root.fontFamily }
+
+          Text {
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: root.lightshowHint()
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          MultiSelect {
+            width: parent.width
+            label: "Rooms"
+            noSelectionText: "Pick rooms"
+            options: (root.model.rooms || []).map(function(r) { return { value: String(r.id), label: r.name } })
+            values: root.lightshowRooms()
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onChanged: function(v) { root.setLightshowRooms(v) }
+          }
+
+          Row {
+            spacing: Style.space(8)
+            Repeater {
+              model: root.swatches
+              Rectangle {
+                required property var modelData
+                readonly property bool picked: root.lightshowColorsSel().indexOf(modelData.h) >= 0
+                width: Style.space(28)
+                height: width
+                radius: width / 2
+                color: modelData.c
+                border.width: picked ? 3 : 1
+                border.color: picked ? root.foreground : Qt.darker(root.foreground, 1.5)
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  enabled: !root.busy
+                  onClicked: root.toggleLightshowColor(parent.modelData.h)
+                }
+              }
+            }
+          }
+
+          Button {
+            width: parent.width
+            bordered: true
+            leftAlign: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            text: root.lightshowIsActive() ? "Stop light show" : "Start light show"
+            enabled: !root.busy
+            onClicked: root.toggleLightshowRun()
+          }
+          Text {
+            visible: root.lightshowWarning !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: root.lightshowWarning
+            color: Color.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
         // ------------------------------------------------------------ room detail
         Column {
           id: roomDetail
@@ -611,73 +709,6 @@ Item {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onChanged: function(v) { root.setAmbientMonitor(roomDetail.room, v) }
-              }
-
-              PanelSeparator { width: parent.width; foreground: root.foreground }
-
-              Column {
-                width: parent.width
-                spacing: Style.spacing.sm
-
-                Text {
-                  text: "Light show"
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  font.bold: true
-                }
-                Text {
-                  width: parent.width
-                  wrapMode: Text.Wrap
-                  text: root.lightshowHint(roomDetail.room)
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
-                Row {
-                  spacing: Style.space(8)
-                  Repeater {
-                    model: root.swatches
-                    Rectangle {
-                      required property var modelData
-                      readonly property bool picked: roomDetail.room &&
-                        root.lightshowColors(roomDetail.room).indexOf(modelData.h) >= 0
-                      width: Style.space(28)
-                      height: width
-                      radius: width / 2
-                      color: modelData.c
-                      border.width: picked ? 3 : 1
-                      border.color: picked ? root.foreground : Qt.darker(root.foreground, 1.5)
-                      MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        enabled: !root.busy
-                        onClicked: root.toggleLightshowColor(roomDetail.room, parent.modelData.h)
-                      }
-                    }
-                  }
-                }
-
-                Button {
-                  width: parent.width
-                  bordered: true
-                  leftAlign: true
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  text: root.lightshowActive(roomDetail.room) ? "Stop light show" : "Start light show"
-                  enabled: !!roomDetail.room && !root.busy
-                  onClicked: root.toggleLightshow(roomDetail.room)
-                }
-                Text {
-                  visible: root.lightshowWarning !== ""
-                  width: parent.width
-                  wrapMode: Text.Wrap
-                  text: root.lightshowWarning
-                  color: Color.urgent
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
               }
 
               Flow {

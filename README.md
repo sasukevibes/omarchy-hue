@@ -127,10 +127,14 @@ lock-screen detection.
 
 ## Light show
 
-Open a room, tap 4 to 6 of the colour swatches to build a palette, then hit
-**Start light show**. Each light is assigned one part of the audio spectrum
-— bass, mid, or treble, round-robin if there are more lights than bands —
-and reacts to *that band specifically*, not just overall loudness:
+This lives at the room list level, not inside a single room — **pick one or
+more rooms**, tap 4 to 6 colour swatches, then hit **Start light show**.
+Every selected room's lights are combined into *one* pool before anything
+else happens: a 3-light room plus a 2-light room becomes a single 5-light
+wave, not a group of 3 and a separate group of 2. Each light in that
+combined pool is assigned one part of the audio spectrum — bass, mid, or
+treble, round-robin — and reacts to *that band specifically*, not just
+overall loudness:
 
 - **The bass light is a dedicated driver.** It holds one fixed colour and
   snaps to full brightness on every bass hit (a kick drum, a bass note),
@@ -153,8 +157,9 @@ and reacts to *that band specifically*, not just overall loudness:
   pace the room's light count can sustain without overloading the bridge.
 - Only one dynamic mode runs at a time: starting a light show stops ambient
   mode (in any room), and vice versa.
-- Click swatches while a show is running to change the palette live — it
-  restarts with the new colours immediately, no need to stop first.
+- Click swatches, or add/remove rooms, while a show is running to change it
+  live — it restarts immediately with the new selection, no need to stop
+  first.
 - Turning an individual light off during a show pauses just that light —
   same per-light exclusion as ambient mode. It stays off until you turn it
   back on, then rejoins the cycle (immediately advancing if its next
