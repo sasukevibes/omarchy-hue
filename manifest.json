@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "ashton.hue",
+  "name": "Philips Hue",
+  "version": "1.0.0",
+  "author": "Ashton",
+  "description": "Discover and control Philips Hue rooms from the Omarchy bar.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Philips Hue",
+    "description": "Room power, brightness, colours, and scenes.",
+    "category": "System",
+    "aliases": ["hue", "lights"],
+    "allowMultiple": false
+  }
+}

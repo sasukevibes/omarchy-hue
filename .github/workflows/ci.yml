@@ -1,0 +1,52 @@
+name: CI
+
+# Deliberately `pull_request`, not `pull_request_target`: this runs against
+# the PR's own code with the default read-only GITHUB_TOKEN and zero
+# repository secrets, so even a malicious PR can't use CI to exfiltrate
+# secrets or gain write access. See CONTRIBUTING.md before changing this.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python syntax check
+        run: python3 -m py_compile hue.py
+
+      - name: QML brace balance sanity check
+        run: |
+          python3 - <<'EOF'
+          import glob
+          import sys
+
+          failed = False
+          for path in glob.glob("*.qml"):
+              text = open(path, encoding="utf-8").read()
+              depth = 0
+              for i, ch in enumerate(text):
+                  if ch == "{":
+                      depth += 1
+                  elif ch == "}":
+                      depth -= 1
+                  if depth < 0:
+                      print(f"::error file={path}::unbalanced '}}' at byte {i}")
+                      failed = True
+                      break
+              else:
+                  if depth != 0:
+                      print(f"::error file={path}::{depth} unclosed '{{' at end of file")
+                      failed = True
+
+          sys.exit(1 if failed else 0)
+          EOF
+
+      - name: manifest.json is valid JSON
+        run: python3 -c "import json; json.load(open('manifest.json'))"

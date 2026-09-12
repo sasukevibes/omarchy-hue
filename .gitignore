@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# Never track local bridge credentials. hue.py always stores these outside
+# this directory (~/.local/state/omarchy/hue.json), but this stays as a
+# belt-and-suspenders guard in case that ever changes.
+hue.json
+*.local-state.json
